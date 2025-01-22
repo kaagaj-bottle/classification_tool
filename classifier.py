@@ -2,24 +2,31 @@ import cv2
 import numpy as np
 import ultralytics
 from ultralytics import YOLO
-from typing import List
+from typing import List, Tuple, Dict
 from pathlib import Path
 import glob
+from pprint import pprint
+import csv
+import torch
+import ultralytics.engine
+import ultralytics.engine.results
+from tqdm import tqdm
 
 
-model_path = r"runs\classify\train3\weights\best.onnx"
-model = cv2.dnn.readNetFromONNX(model_path)
+# model_path = r"runs\classify\train3\weights\best.onnx"
+# model = cv2.dnn.readNetFromONNX(model_path)
 parent_folder = "ss/val"
 IMG_HEIGHT, IMG_WIDTH = 215, 172
 N_CHANNEL = 3
-DIVISIONS = 20
-DIVISION_HEIGHT, DIVISION_WIDTH = 32, 32
-
+N_BOX = 20
+BOX_HEIGHT, BOX_WIDTH = 34, 34
+pprint("Loading the model..")
 model_yolo_path = r"runs\classify\train3\weights\best.pt"
-model_yolo = YOLO(model_yolo_path)
+model_yolo = YOLO(model_yolo_path, verbose=False)
+pprint("Model Loaded...")
 
 
-def get_backpack_imgs(parent_folder: str) -> List[str]:
+def get_backpack_imgs(parent_folder: str) -> Tuple[np.array, List[str]]:
     backpack_list = glob.glob(f"{parent_folder}/*.png")
     len_backpack_list = len(backpack_list)
     image_array = np.zeros(
@@ -27,13 +34,13 @@ def get_backpack_imgs(parent_folder: str) -> List[str]:
     for idx in range(len_backpack_list):
         image_array[idx] = cv2.imread(backpack_list[idx])
 
-    return image_array
+    return image_array, backpack_list
 
 
 def get_division_rects():
     rects = []
     cur_x, cur_y = 10, 18
-    bx_w, bx_h = DIVISION_HEIGHT, DIVISION_WIDTH
+    bx_h, bx_w = BOX_HEIGHT, BOX_WIDTH
     padd = 3
     while cur_y + bx_h <= IMG_HEIGHT:
         cur_x = 10
@@ -46,14 +53,14 @@ def get_division_rects():
 
 
 def divide_backpack_to_items(image_array: np.array) -> np.array:
-
+    # the actual size of item image is 32x32, each side (border) is of size 1 pixel
     divided_images_array = np.zeros(
-        (image_array.shape[0], DIVISIONS, DIVISION_HEIGHT, DIVISION_WIDTH, N_CHANNEL), dtype=np.uint8)
+        (image_array.shape[0], N_BOX, BOX_HEIGHT-2, BOX_WIDTH-2, N_CHANNEL), dtype=np.uint8)
     coordinates = get_division_rects()
     for idx in range(divided_images_array.shape[0]):
         division_counter = 0
         for x, y, w, h in coordinates:
-            divided_image = image_array[idx][y:y+h, x:x+w]
+            divided_image = image_array[idx][y+1:y+h-1, x+1:x+w-1]
             # divided_images_array[idx][division_counter] = np.transpose(
             #     divided_image, (2, 0, 1))
             divided_images_array[idx][division_counter] = divided_image
@@ -62,42 +69,63 @@ def divide_backpack_to_items(image_array: np.array) -> np.array:
     return divided_images_array
 
 
-def classify_divided_image(divided_image_array: np.array):
+# def classify_divided_image_opencv(divided_image_array: np.array):
+#     blobs = cv2.dnn.blobFromImages(
+#         divided_image_array, 1, (BOX_WIDTH-2, BOX_HEIGHT-2), swapRB=True, crop=False).transpose(0, 3, 1, 2)
+#     results = []
+#     try:
+#         for idx, blob in enumerate(blobs):
 
-    # blob = cv2.dnn.blobFromImages(
-    #     divided_image_array, 1.0, (DIVISION_WIDTH, DIVISION_HEIGHT), swapRB=True, crop=False)
-    # try:
+#             model.setInput(blob)
+#             output = model.forward()
+#             results.append(output)
+#     except Exception as e:
+#         print(e)
+#         return None
 
-    #     model.setInput(divided_image_array)
-    #     output = model.forward()
-    #     output
-    # except Exception as e:
-    #     print(e)
-    #     return None
-    print(divided_image_array.shape)
-    output = model_yolo(divided_image_array, verbose=False)
-    return output
+#     return results
+    # print(divided_image_array.shape)
+    # output = model_yolo(divided_image_array, verbose=False)
+    # return output
 
 
-def get_final_result(divided_images_array: np.array):
-    outputs = []
-    for idx in range(divided_images_array.shape[0]):
-        cur_output = classify_divided_image(divided_images_array[idx])
-        outputs.append(cur_output)
-        break
-    print(outputs)
+def classify_divided_image_ultralytics(divided_image_tensor: torch.Tensor) -> List[List[ultralytics.engine.results.Results]]:
+    outputs = model_yolo(divided_image_tensor, verbose=False)
     return outputs
 
 
-def show_outputs(outputs):
-    for output in outputs:
-        output.show()
-        output.save(filename="output.jpg")
+def get_final_result(divided_images_array: torch.Tensor) -> List[List[List[ultralytics.engine.results.Results]]]:
+    outputs: List[List[List[ultralytics.engine.results.Results]]] = []
+    pprint("Running Inference...")
+    for idx in tqdm(range(divided_images_array.shape[0])):
+        cur_output = classify_divided_image_ultralytics(
+            divided_images_array[idx])
+        outputs.append(cur_output)
+    return outputs
+
+
+def format_output(outputs: List[List[List[ultralytics.engine.results.Results]]], backpack_list: List[str]) -> Dict:
+    output_dict: Dict = {}
+    for idx, img in enumerate(backpack_list):
+        output_dict[img] = [item.names[item.probs.top1]
+                            for item in outputs[idx]]
+    return output_dict
+
+
+def write_output_to_csv(formatted_output: Dict, out_file: str) -> None:
+    with open(out_file, 'w') as csv_file:
+        writer = csv.writer(csv_file)
+        for key, value in formatted_output.items():
+            writer.writerow([key, value])
 
 
 if __name__ == '__main__':
-    image_array = get_backpack_imgs(parent_folder)
-    divided_images_array = divide_backpack_to_items(image_array)
-    outputs = get_final_result(divided_images_array=divided_images_array)
-
-    print(outputs)
+    image_array, backpack_list = get_backpack_imgs(parent_folder)
+    divided_images_array = np.transpose(divide_backpack_to_items(
+        image_array), (0, 1, 4, 2, 3)).astype(np.float32)/255.0
+    divided_images_tensor = torch.from_numpy(divided_images_array)
+    outputs: List[List[ultralytics.engine.results.Results]] = get_final_result(
+        divided_images_tensor)
+    print("Writing output to file...")
+    formatted_output = format_output(outputs, backpack_list)
+    write_output_to_csv(formatted_output, "output/o1.csv")
