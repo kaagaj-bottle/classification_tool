@@ -11,6 +11,7 @@ import torch
 import ultralytics.engine
 import ultralytics.engine.results
 from tqdm import tqdm
+import time
 
 
 # model_path = r"runs\classify\train3\weights\best.onnx"
@@ -21,9 +22,23 @@ N_CHANNEL = 3
 N_BOX = 20
 BOX_HEIGHT, BOX_WIDTH = 34, 34
 pprint("Loading the model..")
-model_yolo_path = r"runs\classify\train3\weights\best.pt"
+model_yolo_path = r"runs/classify/train3/weights/best.pt"
 model_yolo = YOLO(model_yolo_path, verbose=False)
 pprint("Model Loaded...")
+
+total_time_for_single_batches = 0
+
+
+def timing_decorator(func):
+    def wrapper(*args, **kwargs):
+        global total_time_for_single_batches
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        total_time_for_single_batches += (end_time-start_time)
+        return result
+
+    return wrapper
 
 
 def get_backpack_imgs(parent_folder: str) -> Tuple[np.array, List[str]]:
@@ -52,6 +67,7 @@ def get_division_rects():
     return rects
 
 
+@timing_decorator
 def divide_backpack_to_items(image_array: np.array) -> np.array:
     # the actual size of item image is 32x32, each side (border) is of size 1 pixel
     divided_images_array = np.zeros(
@@ -69,31 +85,33 @@ def divide_backpack_to_items(image_array: np.array) -> np.array:
     return divided_images_array
 
 
-# def classify_divided_image_opencv(divided_image_array: np.array):
-#     blobs = cv2.dnn.blobFromImages(
-#         divided_image_array, 1, (BOX_WIDTH-2, BOX_HEIGHT-2), swapRB=True, crop=False).transpose(0, 3, 1, 2)
-#     results = []
-#     try:
-#         for idx, blob in enumerate(blobs):
+def classify_divided_image_opencv(divided_image_array: np.array):
+    blobs = cv2.dnn.blobFromImages(
+        divided_image_array, 1, (BOX_WIDTH-2, BOX_HEIGHT-2), swapRB=True, crop=False).transpose(0, 3, 1, 2)
+    results = []
+    try:
+        for idx, blob in enumerate(blobs):
 
-#             model.setInput(blob)
-#             output = model.forward()
-#             results.append(output)
-#     except Exception as e:
-#         print(e)
-#         return None
+            model.setInput(blob)
+            output = model.forward()
+            results.append(output)
+    except Exception as e:
+        print(e)
+        return None
 
-#     return results
-    # print(divided_image_array.shape)
-    # output = model_yolo(divided_image_array, verbose=False)
-    # return output
+    return results
+    print(divided_image_array.shape)
+    output = model_yolo(divided_image_array, verbose=False)
+    return output
 
 
+@timing_decorator
 def classify_divided_image_ultralytics(divided_image_tensor: torch.Tensor) -> List[List[ultralytics.engine.results.Results]]:
     outputs = model_yolo(divided_image_tensor, verbose=False)
     return outputs
 
 
+@timing_decorator
 def get_final_result(divided_images_array: torch.Tensor) -> List[List[List[ultralytics.engine.results.Results]]]:
     outputs: List[List[List[ultralytics.engine.results.Results]]] = []
     pprint("Running Inference...")
@@ -120,6 +138,7 @@ def write_output_to_csv(formatted_output: Dict, out_file: str) -> None:
 
 
 if __name__ == '__main__':
+    init_time = time.time()
     image_array, backpack_list = get_backpack_imgs(parent_folder)
     divided_images_array = np.transpose(divide_backpack_to_items(
         image_array), (0, 1, 4, 2, 3)).astype(np.float32)/255.0
@@ -129,3 +148,4 @@ if __name__ == '__main__':
     print("Writing output to file...")
     formatted_output = format_output(outputs, backpack_list)
     write_output_to_csv(formatted_output, "output/o1.csv")
+    print(f"Avg time for single batch: {total_time_for_single_batches/201}")
